@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Conducción terapéutica WebXR</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:#101820;color:#f4f7fa;overflow:hidden}
+#panel{position:fixed;z-index:5;left:12px;top:12px;max-width:min(440px,calc(100vw - 24px));background:#142331ee;border:1px solid #496174;border-radius:14px;padding:12px 14px;backdrop-filter:blur(8px)}
+h1{font-size:17px;margin:0 0 7px}
+p{font-size:12px;line-height:1.4;margin:5px 0;color:#d4e0e9}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+button,select{font:inherit;color:#fff;background:#245b79;border:1px solid #76a9c5;border-radius:9px;padding:8px 10px}
+button:active{background:#397fa5}
+#status{font-size:12px;color:#a9d8f2;margin-top:7px}
+#help{position:fixed;z-index:4;right:12px;bottom:12px;max-width:320px;background:#142331dd;border-radius:12px;padding:10px;font-size:12px;line-height:1.4}
+#xr-button{display:none}
+canvas{display:block}
+@media(max-width:650px){#panel{max-width:calc(100vw - 24px)}#help{display:none}}
+</style>
+</head>
+<body>
+<div id="panel">
+  <h1>Conducción terapéutica · Prototipo 0.1</h1>
+  <p>Simulación experimental en entorno urbano. No es un simulador homologado ni una evaluación de aptitud para conducir.</p>
+  <div class="row">
+    <button id="start">Entrar en realidad virtual</button>
+    <button id="recenter">Recalibrar volante</button>
+    <button id="pause">Pausar</button>
+  </div>
+  <div class="row">
+    <label style="font-size:12px">Sensibilidad dirección
+      <select id="sensitivity"><option value=".55">Baja</option><option value=".85" selected>Media</option><option value="1.2">Alta</option></select>
+    </label>
+    <label style="font-size:12px">Escenario
+      <select id="scene"><option value="street">Calle urbana</option><option value="roundabout">Aproximación a rotonda</option></select>
+    </label>
+  </div>
+  <div id="status">Estado: esperando inicio. Para la primera prueba, usar solo en sedestación y con supervisión.</div>
+</div>
+<div id="help">
+  <b>Controles previstos</b><br>
+  • Girar físicamente el mando izquierdo para dirigir.<br>
+  • Pulsador externo Acelerar: mantener pulsado.<br>
+  • Pulsador externo Frenar: mantener pulsado.<br>
+  • Sin pulsadores conectados: gatillo del mando izquierdo acelera y botón lateral frena (modo de prueba).<br>
+  • Recalibrar con el mando izquierdo en posición neutra.
+</div>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+const statusEl=document.querySelector('#status');
+const startBtn=document.querySelector('#start');
+const pauseBtn=document.querySelector('#pause');
+const recenterBtn=document.querySelector('#recenter');
+const sensitivityEl=document.querySelector('#sensitivity');
+const sceneEl=document.querySelector('#scene');
+
+let renderer,scene,camera,session=null,refSpace=null,clock=new THREE.Clock();
+let paused=false, steeringZero=null, steering=0, speed=0, distance=0;
+let leftSource=null, lastExternalName='No detectado', externalAccel=false, externalBrake=false;
+let roadGroup, car, wheel, wheelPivot, traffic=[], pedestrians=[], buildings=[];
+let currentScene='street';
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const status=(s)=>statusEl.textContent='Estado: '+s;
+
+scene=new THREE.Scene();
+scene.background=new THREE.Color(0x9bc7df);
+scene.fog=new THREE.Fog(0x9bc7df,35,125);
+camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.05,250);
+renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.6));
+renderer.setSize(innerWidth,innerHeight);
+renderer.xr.enabled=true;
+renderer.shadowMap.enabled=false;
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xe8f5ff,0x59604d,2.0));
+const sun=new THREE.DirectionalLight(0xffffff,1.7);sun.position.set(-12,22,10);scene.add(sun);
+
+function mat(color,roughness=.85){return new THREE.MeshStandardMaterial({color,roughness});}
+const asphalt=mat(0x343b42), sidewalk=mat(0xb9b7ae), lineMat=mat(0xf5f0d7), grass=mat(0x557a54);
+const carRed=mat(0xb63832), carBlue=mat(0x236b91), glass= new THREE.MeshStandardMaterial({color:0x9dc5d6,metalness:.1,roughness:.25});
+const dark=mat(0x20272c), white=mat(0xf2f2eb), yellow=mat(0xf1c64c);
+function box(w,h,d,material,x,y,z,parent=scene){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),material);m.position.set(x,y,z);parent.add(m);return m;}
+function cylinder(r1,r2,h,material,x,y,z,parent=scene){const m=new THREE.Mesh(new THREE.CylinderGeometry(r1,r2,h,16),material);m.position.set(x,y,z);parent.add(m);return m;}
+
+function makeWorld(){
+  roadGroup=new THREE.Group();scene.add(roadGroup);
+  // Long straight two-way urban road. Driver travels toward negative Z.
+  box(12,.12,180,asphalt,0,-.08,-55,roadGroup);
+  box(1.7,.2,180,sidewalk,-6.85,-.02,-55,roadGroup);
+  box(1.7,.2,180,sidewalk,6.85,-.02,-55,roadGroup);
+  box(.18,.02,180,lineMat,0,.0,-55,roadGroup);
+  for(let z=8;z>-145;z-=9) box(.12,.025,4,lineMat,0,.01,z,roadGroup);
+  for(let side of [-1,1]){
+    for(let z=0;z>-145;z-=18){
+      const w=5+Math.random()*4,h=5+Math.random()*13,d=8+Math.random()*6;
+      const b=box(w,h,d,mat([0x9dabae,0xb7a58d,0x8c9da7,0xb6b8ad][Math.floor(Math.random()*4)]),side*(10+Math.random()*3),h/2,z-7,roadGroup);
+      const rows=Math.floor(h/2.5);
+      for(let yy=1.5;yy<h-1;yy+=2.5) for(let xx=-w/2+1;xx<w/2-0.5;xx+=1.8){
+        box(.7,.9,.08,glass,b.position.x+xx,yy,b.position.z-d/2-.05,roadGroup);
+      }
+    }
+    for(let z=-5;z>-140;z-=23){
+      cylinder(.08,.11,3,mat(0x555d5e),side*5.7,1.5,z,roadGroup);
+      const lamp= new THREE.Mesh(new THREE.SphereGeometry(.22,12,8),yellow);lamp.position.set(side*5.7,3.1,z);roadGroup.add(lamp);
+    }
+  }
+  // zebra crossing
+  for(let i=-5;i<=5;i++) box(.65,.025,2.2,white,i*.95,.02,-28,roadGroup);
+  // traffic light
+  box(.16,4,.16,dark,5.7,2,-25,roadGroup);
+  const signal= new THREE.Group();signal.position.set(5.7,3.3,-25);roadGroup.add(signal);
+  box(.65,1.55,.45,dark,0,0,0,signal);
+  for(let i=0;i<3;i++){const c=new THREE.Mesh(new THREE.SphereGeometry(.17,16,12),mat([0xe53e3e,0xe9c342,0x38a75a][i]));c.position.set(0,.48-i*.48,.24);signal.add(c);}
+  // car cockpit: hood and dashboard visible, camera seated at driver location
+  car=new THREE.Group();scene.add(car);
+  box(1.65,.18,1.1,carRed,0,.65,-1.15,car);
+  box(1.45,.12,.6,dark,0,.42,-.75,car);
+  // dashboard
+  box(1.8,.22,.55,dark,0,.88,-.35,car);
+  // steering wheel, facing driver (vertical plane)
+  wheelPivot=new THREE.Group();wheelPivot.position.set(-.48,1.02,-.05);car.add(wheelPivot);
+  const torus=new THREE.Mesh(new THREE.TorusGeometry(.27,.035,10,32),dark);wheelPivot.add(torus);
+  box(.07,.38,.07,dark,0,0,0,wheelPivot);
+  box(.42,.07,.07,dark,0,0,0,wheelPivot);
+  // mirrors
+  box(.12,.08,.28,dark,-.95,1.12,-.45,car);
+  box(.12,.08,.28,dark,.95,1.12,-.45,car);
+  camera.position.set(0,1.58,.22);car.add(camera);
+}
+makeWorld();
+
+function makeTraffic(){
+  for(let i=0;i<5;i++){
+    const g=new THREE.Group();scene.add(g);
+    const body=box(1.45,.65,2.5,i%2?carBlue:carRed,0,.55,0,g);
+    box(1.2,.45,1.25,glass,0,1.02,-.12,g);
+    for(let x of [-.58,.58])for(let z of [-.82,.82]){
+      const wh=new THREE.Mesh(new THREE.CylinderGeometry(.22,.22,.13,14),dark);wh.rotation.z=Math.PI/2;wh.position.set(x,.25,z);g.add(wh);
+    }
+    g.position.set((i%2?2.5:-2.5),0,-20-i*23);traffic.push(g);
+  }
+  for(let i=0;i<3;i++){
+    const g=new THREE.Group();scene.add(g);
+    cylinder(.13,.13,.8,mat(0x343434),0,.4,0,g);
+    const head=new THREE.Mesh(new THREE.SphereGeometry(.22,12,10),mat(0xe1b58d));head.position.y=.95;g.add(head);
+    box(.48,.65,.25,mat(0x315c87),0,.72,0,g);
+    g.position.set(i===1? -5:5,0,-35-i*35);pedestrians.push(g);
+  }
+}
+makeTraffic();
+
+function setScenario(which){
+  currentScene=which;
+  if(which==='roundabout'){
+    // visible circular roundabout marker ahead
+    const island=new THREE.Mesh(new THREE.CylinderGeometry(4.1,4.1,.18,48),grass);
+    island.position.set(0,.02,-57);scene.add(island);island.userData.roundabout=true;
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(4.2,.16,8,48),white);ring.rotation.x=Math.PI/2;ring.position.set(0,.14,-57);scene.add(ring);ring.userData.roundabout=true;
+    status('escenario de aproximación a rotonda. Pulsadores externos aún no detectados.');
+  } else {
+    scene.children.filter(o=>o.userData.roundabout).forEach(o=>scene.remove(o));
+    status('calle urbana. Conecta los pulsadores y pulsa Entrar en realidad virtual.');
+  }
+}
+setScenario('street');sceneEl.addEventListener('change',()=>setScenario(sceneEl.value));
+
+function getYaw(q){
+  const e=new THREE.Euler().setFromQuaternion(q,'YXZ');
+  return e.y;
+}
+function findLeftSource(s){
+  leftSource=s.inputSources.find(x=>x.handedness==='left' && x.gripSpace) || null;
+}
+function recenter(){
+  if(!session||!refSpace||!leftSource){status('no se detecta el mando izquierdo; entra en VR y sujétalo en posición neutra.');return;}
+  // Use current frame's last known orientation, updated continuously.
+  if(lastLeftYaw!==null){steeringZero=lastLeftYaw;steering=0;status('volante recalibrado.');}
+}
+let lastLeftYaw=null;
+recenterBtn.addEventListener('click',recenter);
+document.addEventListener('keydown',e=>{if(e.key==='r'||e.key==='R')recenter();if(e.key===' '){paused=!paused;pauseBtn.textContent=paused?'Reanudar':'Pausar';}});
+pauseBtn.addEventListener('click',()=>{paused=!paused;pauseBtn.textContent=paused?'Reanudar':'Pausar';});
+
+function readExternalButtons(){
+  externalAccel=false;externalBrake=false;lastExternalName='No detectado';
+  const gps=navigator.getGamepads?navigator.getGamepads():[];
+  for(const gp of gps){
+    if(!gp)continue;
+    const id=(gp.id||'Gamepad').toLowerCase();
+    // Ignore the Quest Touch controllers here; external switch interfaces are mapped separately.
+    if(id.includes('oculus') || id.includes('touch') || id.includes('meta quest') || id.includes('openxr')) continue;
+    lastExternalName=gp.id||'Gamepad';
+    // Generic mapping: external button 0 = accelerator, button 1 = brake.
+    if(gp.buttons?.[0]?.pressed)externalAccel=true;
+    if(gp.buttons?.[1]?.pressed)externalBrake=true;
+  }
+}
+function animate(t,frame){
+  if(frame && session){
+    const pose=leftSource && frame.get pose?null:null;
+    if(leftSource){
+      const p=frame.getPose(leftSource.gripSpace,refSpace);
+      if(p){
+        lastLeftYaw=getYaw(new THREE.Quaternion(p.transform.orientation.x,p.transform.orientation.y,p.transform.orientation.z,p.transform.orientation.w));
+        if(steeringZero===null)steeringZero=lastLeftYaw;
+        let delta=lastLeftYaw-steeringZero;
+        while(delta>Math.PI)delta-=Math.PI*2;
+        while(delta< -Math.PI)delta+=Math.PI*2;
+        steering=clamp(delta*Number(sensitivityEl.value),-1,1);
+      }
+    }
+  }
+  readExternalButtons();
+  if(!paused){
+    // If no external gamepad is present, controller buttons are used only for initial bench testing.
+    let accel=externalAccel,brake=externalBrake;
+    if(!lastExternalName || lastExternalName==='No detectado'){
+      const gp=navigator.getGamepads?.()||[];
+      const xrGamepad=leftSource?.gamepad;
+      if(xrGamepad){accel=!!xrGamepad.buttons?.[0]?.pressed;brake=!!xrGamepad.buttons?.[1]?.pressed;}
+    }
+    if(accel) speed=Math.min(13,speed+0.035);
+    else speed=Math.max(2.2,speed-0.018);
+    if(brake) speed=Math.max(0,speed-.12);
+    distance+=speed*.012;
+    // vehicle follows steering; smooth lateral motion
+    car.position.x += (steering*3.1-car.position.x)*.035;
+    car.rotation.y += (-steering*.16-car.rotation.y)*.035;
+    wheelPivot.rotation.z=-steering*.75;
+    // Move road/buildings slowly to imply forward travel
+    roadGroup.position.z=(distance*1.7)%18;
+    traffic.forEach((g,i)=>{
+      g.position.z += speed*.008;
+      if(g.position.z>5)g.position.z=-110-i*12;
+      // keep traffic lanes distinct
+      g.position.x=(i%2?2.5:-2.5) + Math.sin(distance*.12+i)*.15;
+    });
+    pedestrians.forEach((g,i)=>{g.position.z+=speed*.007;if(g.position.z>5)g.position.z=-105-i*25;});
+  }
+  renderer.render(scene,camera);
+}
+renderer.setAnimationLoop((t,frame)=>animate(t,frame));
+
+startBtn.addEventListener('click',async()=>{
+  if(!navigator.xr){status('WebXR no está disponible. Abre esta página en el navegador de Meta Quest.');return;}
+  try{
+    const supported=await navigator.xr.isSessionSupported('immersive-vr');
+    if(!supported){status('Este navegador no ofrece una sesión VR inmersiva.');return;}
+    session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
+    await renderer.xr.setSession(session);
+    refSpace=await session.requestReferenceSpace('local-floor').catch(()=>session.requestReferenceSpace('local'));
+    findLeftSource(session);
+    session.addEventListener('inputsourceschange',()=>findLeftSource(session));
+    session.addEventListener('end',()=>{session=null;refSpace=null;leftSource=null;steeringZero=null;status('sesión VR finalizada.');});
+    status('VR activa. Mantén el mando izquierdo neutro y pulsa Recalibrar volante.');
+  }catch(err){status('No se pudo iniciar VR: '+err.message);}
+});
+
+window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+status('listo. Abre esta página en el navegador de las Quest para iniciar VR.');
+</script>
+</body>
+</html>
