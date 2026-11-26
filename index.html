@@ -173,7 +173,15 @@ function getYaw(q){
   return e.y;
 }
 function findLeftSource(s){
-  leftSource=s.inputSources.find(x=>x.handedness==='left' && x.gripSpace) || null;
+  const inputs=Array.from(s?.inputSources || []);
+
+  leftSource=inputs.find(x=>x.handedness==='left' && x.gripSpace) || null;
+
+  const details=inputs.map((x,i)=>
+    `${i}: ${x.handedness}, grip: ${!!x.gripSpace}, ray: ${!!x.targetRaySpace}`
+  ).join(' | ');
+
+  status(`WebXR detecta ${inputs.length} fuentes: ${details || 'ninguna'}`);
 }
 function recenter(){
   if(!session||!refSpace||!leftSource){status('no se detecta el mando izquierdo; entra en VR y sujétalo en posición neutra.');return;}
@@ -255,7 +263,7 @@ startBtn.addEventListener('click',async()=>{
     findLeftSource(session);
     session.addEventListener('inputsourceschange',()=>findLeftSource(session));
     session.addEventListener('end',()=>{session=null;refSpace=null;leftSource=null;steeringZero=null;status('sesión VR finalizada.');});
-    status('VR activa. Mantén el mando izquierdo neutro y pulsa Recalibrar volante.');
+    findLeftSource(session);
   }catch(err){status('No se pudo iniciar VR: '+err.message);}
 });
 
