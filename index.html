@@ -201,7 +201,7 @@ function readExternalButtons(){
 }
 function animate(t,frame){
   if(frame && session){
-    const pose=leftSource && frame.get pose?null:null;
+    const pose=leftSource && frame.getpose?null:null;
     if(leftSource){
       const p=frame.getPose(leftSource.gripSpace,refSpace);
       if(p){
