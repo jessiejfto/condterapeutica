@@ -249,7 +249,7 @@ startBtn.addEventListener('click',async()=>{
   try{
     const supported=await navigator.xr.isSessionSupported('immersive-vr');
     if(!supported){status('Este navegador no ofrece una sesión VR inmersiva.');return;}
-    session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
+    session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor']});
     await renderer.xr.setSession(session);
     refSpace=await session.requestReferenceSpace('local-floor').catch(()=>session.requestReferenceSpace('local'));
     findLeftSource(session);
